@@ -1,0 +1,16 @@
+services:
+  api:
+    build: .
+    command: python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+
+  dashboard:
+    build: .
+    command: gunicorn dashboard.app:server --bind 0.0.0.0:7860 --timeout 120 --workers 1 --threads 2
+    environment:
+      API_BASE_URL: http://api:8000
+    depends_on:
+      - api
+    ports:
+      - "7860:7860"

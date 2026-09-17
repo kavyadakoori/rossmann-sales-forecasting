@@ -1,118 +1,172 @@
 # ── Imports ───────────────────────────────────────────────────────
-import pandas as pd
-import numpy as np
 import json
-import os
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.config import PROCESSED_DATA_DIR
+from src.feature_engineering import (
+    add_date_features,
+    add_lag_features,
+    add_rolling_features,
+    encode_categorical_features,
+)
 
 # ── Paths ─────────────────────────────────────────────────────────
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR   = os.path.join(BASE_DIR, '..', 'data', 'processed')
-DASH_DIR   = os.path.join(BASE_DIR, '..', 'dashboard', 'data')
+BASE_DIR = Path(__file__).resolve().parents[1]
+DATA_DIR = BASE_DIR / "data"
+DASH_DIR = BASE_DIR / "dashboard" / "data"
+RESULTS_DIR = DATA_DIR / "results"
 
-# ── Create dashboard data folder ──────────────────────────────────
-os.makedirs(DASH_DIR, exist_ok=True)
+DASH_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Load data ─────────────────────────────────────────────────────
-print("📦 Loading data...")
-df = pd.read_csv(os.path.join(DATA_DIR, 'train_merged.csv'),
-                 low_memory=False)
-df['Date'] = pd.to_datetime(df['Date'])
-df_open = df[df['Open'] == 1].copy()
-df_open['Year']  = df_open['Date'].dt.year
-df_open['Month'] = df_open['Date'].dt.month
-df_open['Week']  = df_open['Date'].dt.isocalendar().week.astype(int)
 
-df_features = pd.read_csv(os.path.join(DATA_DIR, 'train_features.csv'),
-                           low_memory=False)
-df_features['Date'] = pd.to_datetime(df_features[['Year','Month','Day']])
+def safe_read_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path, low_memory=False)
 
-# ── 1. KPIs ───────────────────────────────────────────────────────
-print("📊 Computing KPIs...")
-store_totals     = df_open.groupby('Store')['Sales'].sum()
-best_store       = int(store_totals.idxmax())
-best_store_sales = float(store_totals.max())
 
-kpis = {
-    'total_sales'      : float(df_open['Sales'].sum()),
-    'avg_daily_sales'  : float(df_open['Sales'].mean()),
-    'total_customers'  : float(df_open['Customers'].sum()),
-    'total_stores'     : int(df_open['Store'].nunique()),
-    'best_store'       : best_store,
-    'best_store_sales' : best_store_sales
-}
-with open(os.path.join(DASH_DIR, 'kpis.json'), 'w') as f:
-    json.dump(kpis, f)
-print(f"   ✅ kpis.json saved")
+def prepare_dashboard_data() -> None:
+    print("📦 Loading processed data...")
+    merged_df = safe_read_csv(PROCESSED_DATA_DIR / "merged.csv")
+    if merged_df.empty:
+        raise FileNotFoundError(
+            "Missing merged.csv. Run the preprocessing pipeline first."
+        )
 
-# ── 2. Monthly Sales ──────────────────────────────────────────────
-print("📊 Computing monthly sales...")
-monthly = df_open.groupby(['Year','Month'])['Sales'].sum().reset_index()
-monthly['Date'] = pd.to_datetime(
-    monthly['Year'].astype(str) + '-' +
-    monthly['Month'].astype(str))
-monthly = monthly.sort_values('Date')
-monthly['Date'] = monthly['Date'].astype(str)
-monthly.to_csv(os.path.join(DASH_DIR, 'monthly_sales.csv'), index=False)
-print(f"   ✅ monthly_sales.csv saved — {len(monthly)} rows")
+    merged_df["Date"] = pd.to_datetime(merged_df["Date"], errors="coerce")
+    df_open = merged_df[merged_df["Open"] == 1].copy()
+    df_open["Year"] = df_open["Date"].dt.year
+    df_open["Month"] = df_open["Date"].dt.month
+    df_open["Week"] = df_open["Date"].dt.isocalendar().week.astype(int)
 
-# ── 3. Store Performance ──────────────────────────────────────────
-print("📊 Computing store performance...")
-store_perf = df_open.groupby('Store').agg(
-    Total_Sales    = ('Sales','sum'),
-    Avg_Sales      = ('Sales','mean'),
-    Total_Customers= ('Customers','sum')
-).reset_index().sort_values('Total_Sales', ascending=False)
-store_perf.to_csv(os.path.join(DASH_DIR, 'store_perf.csv'), index=False)
-print(f"   ✅ store_perf.csv saved — {len(store_perf)} rows")
+    test_df = safe_read_csv(PROCESSED_DATA_DIR / "test.csv")
+    test_df["Date"] = pd.to_datetime(test_df["Date"], errors="coerce")
+    # ── 1. KPIs ───────────────────────────────────────────────────────
+    print("📊 Computing KPIs...")
+    store_totals = df_open.groupby("Store")["Sales"].sum()
+    best_store = int(store_totals.idxmax())
+    best_store_sales = float(store_totals.max())
 
-# ── 4. Promo Sales ────────────────────────────────────────────────
-print("📊 Computing promo impact...")
-promo = df_open.groupby('Promo')['Sales'].mean().reset_index()
-promo['Promo'] = promo['Promo'].map({0:'No Promo', 1:'Promo'})
-promo.to_csv(os.path.join(DASH_DIR, 'promo_sales.csv'), index=False)
-print(f"   ✅ promo_sales.csv saved — {len(promo)} rows")
+    kpis = {
+        "total_sales": float(df_open["Sales"].sum()),
+        "avg_daily_sales": float(df_open["Sales"].mean()),
+        "total_customers": float(df_open["Customers"].sum()),
+        "total_stores": int(df_open["Store"].nunique()),
+        "best_store": best_store,
+        "best_store_sales": best_store_sales,
+    }
 
-# ── 5. Day of Week ────────────────────────────────────────────────
-print("📊 Computing day of week sales...")
-dow = df_open.groupby('DayOfWeek')['Sales'].mean().reset_index()
-dow['DayName'] = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
-dow.to_csv(os.path.join(DASH_DIR, 'dow_sales.csv'), index=False)
-print(f"   ✅ dow_sales.csv saved — {len(dow)} rows")
+    with (DASH_DIR / "kpis.json").open("w", encoding="utf-8") as f:
+        json.dump(kpis, f)
+    print("   ✅ kpis.json saved")
 
-# ── 6. Test predictions (Actual vs Predicted) ─────────────────────
-print("📊 Computing test predictions...")
-import pickle
-model_path = os.path.join(BASE_DIR, 'model.pkl')
-with open(model_path, 'rb') as f:
-    model = pickle.load(f)
+    # ── 2. Monthly Sales ──────────────────────────────────────────────
+    print("📊 Computing monthly sales...")
+    monthly = df_open.groupby(["Year", "Month"])["Sales"].sum().reset_index()
+    monthly["Date"] = pd.to_datetime(
+        monthly["Year"].astype(str) + "-" + monthly["Month"].astype(str)
+    )
+    monthly = monthly.sort_values("Date").copy()
+    monthly["Date"] = monthly["Date"].astype(str)
+    monthly.to_csv(DASH_DIR / "monthly_sales.csv", index=False)
+    print(f"   ✅ monthly_sales.csv saved — {len(monthly)} rows")
 
-feature_cols = [c for c in df_features.columns
-                if c not in ['Sales','Date']]
+    # ── 3. Store Performance ──────────────────────────────────────────
+    print("📊 Computing store performance...")
+    store_perf = (
+        df_open.groupby("Store")
+        .agg(
+            Total_Sales=("Sales", "sum"),
+            Avg_Sales=("Sales", "mean"),
+            Total_Customers=("Customers", "sum"),
+        )
+        .reset_index()
+        .sort_values("Total_Sales", ascending=False)
+    )
+    store_perf.to_csv(DASH_DIR / "store_perf.csv", index=False)
+    print(f"   ✅ store_perf.csv saved — {len(store_perf)} rows")
 
-test_data = df_features[df_features['Date'] >= '2015-06-01'].copy()
-preds = model.predict(test_data[feature_cols],
-                      num_iteration=model.best_iteration)
-preds = np.clip(preds, 0, None)
-test_data = test_data[['Store','Date','Sales']].copy()
-test_data['Predicted'] = preds
-test_data['Date'] = test_data['Date'].astype(str)
-test_data.to_csv(os.path.join(DASH_DIR, 'test_predictions.csv'), index=False)
-print(f"   ✅ test_predictions.csv saved — {len(test_data)} rows")
+    # ── 4. Promo Sales ────────────────────────────────────────────────
+    print("📊 Computing promo impact...")
+    promo = df_open.groupby("Promo")["Sales"].mean().reset_index()
+    promo["Promo"] = promo["Promo"].map({0: "No Promo", 1: "Promo"})
+    promo.to_csv(DASH_DIR / "promo_sales.csv", index=False)
+    print(f"   ✅ promo_sales.csv saved — {len(promo)} rows")
 
-# ── 7. Features lite (last 60 days per store for forecasting) ─────
-print("📊 Saving features lite...")
-features_lite = df_features.groupby('Store').tail(30).copy()
-features_lite['Date'] = features_lite['Date'].astype(str)
-features_lite.to_csv(os.path.join(DASH_DIR, 'features_lite.csv'), index=False)
-print(f"   ✅ features_lite.csv saved — {len(features_lite)} rows")
+    # ── 5. Day of Week ────────────────────────────────────────────────
+    print("📊 Computing day of week sales...")
+    dow = df_open.groupby("DayOfWeek")["Sales"].mean().reset_index()
+    dow["DayName"] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    dow.to_csv(DASH_DIR / "dow_sales.csv", index=False)
+    print(f"   ✅ dow_sales.csv saved — {len(dow)} rows")
 
-# ── Summary ───────────────────────────────────────────────────────
-print()
-print("=" * 50)
-print("✅ All dashboard data prepared!")
-print(f"📁 Saved to: dashboard/data/")
-print()
-for f in os.listdir(DASH_DIR):
-    size = os.path.getsize(os.path.join(DASH_DIR, f)) / 1024
-    print(f"   {f:<35} : {size:.1f} KB")
-print("=" * 50)
+    # ── 6. Test predictions (Actual vs Predicted) ─────────────────────
+    print("📊 Computing test predictions...")
+    test_predictions = pd.DataFrame(
+        columns=["Store", "Date", "Actual_Sales", "Predicted_Sales"]
+    )
+
+    predictions_path = RESULTS_DIR / "predictions.csv"
+    if predictions_path.exists():
+        predictions = safe_read_csv(predictions_path)
+        if not predictions.empty:
+            predictions = predictions[["Store", "Date", "Sales"]].copy()
+            predictions["Date"] = pd.to_datetime(predictions["Date"], errors="coerce")
+            predictions = predictions.rename(columns={"Sales": "Predicted_Sales"})
+
+            actual = test_df[["Store", "Date", "Sales"]].copy()
+            actual = actual.rename(columns={"Sales": "Actual_Sales"})
+            actual["Date"] = pd.to_datetime(actual["Date"], errors="coerce")
+
+            test_predictions = actual.merge(
+                predictions, on=["Store", "Date"], how="inner"
+            )
+
+    test_predictions["Date"] = test_predictions["Date"].astype(str)
+    test_predictions.to_csv(DASH_DIR / "test_predictions.csv", index=False)
+    print(f"   ✅ test_predictions.csv saved — {len(test_predictions)} rows")
+
+    # ── 7. Features lite (recent engineered features for forecasting) ─────
+    print("📊 Saving features lite...")
+    if not merged_df.empty:
+        features_lite = merged_df.copy()
+        features_lite["Date"] = pd.to_datetime(features_lite["Date"], errors="coerce")
+
+        features_lite = add_date_features(features_lite)
+        features_lite = encode_categorical_features(features_lite)
+        features_lite = add_lag_features(features_lite)
+        features_lite = add_rolling_features(features_lite)
+
+        lag_roll_cols = [
+            col for col in features_lite.columns if col.startswith("Lag_") or col.startswith("Rolling_")
+        ]
+        features_lite = features_lite.dropna(subset=lag_roll_cols).copy()
+        features_lite = features_lite.groupby("Store").tail(60).copy()
+
+        features_lite["Date"] = features_lite["Date"].astype(str)
+        features_lite.to_csv(DASH_DIR / "features_lite.csv", index=False)
+        print(f"   ✅ features_lite.csv saved — {len(features_lite)} rows")
+    else:
+        print("   ⚠️ merged_df is empty; skipping features_lite.csv")
+
+    # ── Summary ───────────────────────────────────────────────────────
+    print()
+    print("=" * 50)
+    print("✅ All dashboard data prepared!")
+    print("📁 Saved to: dashboard/data/")
+    print()
+    for path in sorted(DASH_DIR.iterdir()):
+        size = path.stat().st_size / 1024
+        print(f"   {path.name:<35} : {size:.1f} KB")
+    print("=" * 50)
+
+
+if __name__ == "__main__":
+    prepare_dashboard_data()

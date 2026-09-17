@@ -1,119 +1,55 @@
 # ── Imports ───────────────────────────────────────────────────────
-import dash
-from dash import dcc, html, Input, Output
-import dash_bootstrap_components as dbc
-import plotly.express as px
-import plotly.graph_objects as go
-import pandas as pd
-import numpy as np
-import pickle
 import json
 import os
+from pathlib import Path
+
+import dash
+from dash import Input, Output, dcc, html
+import dash_bootstrap_components as dbc
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import requests
 
 # ── Paths ─────────────────────────────────────────────────────────
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR   = os.path.join(BASE_DIR, 'data')
-MODEL_PATH = os.path.join(BASE_DIR, 'model.pkl') \
-    if os.path.exists(os.path.join(BASE_DIR, 'model.pkl')) \
-    else os.path.join(BASE_DIR, '..', 'src', 'model.pkl')
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
 
 # ── Load pre-computed data ────────────────────────────────────────
-with open(os.path.join(DATA_DIR, 'kpis.json')) as f:
+with (DATA_DIR / "kpis.json").open(encoding="utf-8") as f:
     kpis = json.load(f)
 
-monthly_sales = pd.read_csv(os.path.join(DATA_DIR, 'monthly_sales.csv'))
-monthly_sales['Date'] = pd.to_datetime(monthly_sales['Date'])
+monthly_sales = pd.read_csv(DATA_DIR / "monthly_sales.csv")
+monthly_sales["Date"] = pd.to_datetime(monthly_sales["Date"])
 
-store_perf    = pd.read_csv(os.path.join(DATA_DIR, 'store_perf.csv'))
-promo_sales   = pd.read_csv(os.path.join(DATA_DIR, 'promo_sales.csv'))
-dow_sales     = pd.read_csv(os.path.join(DATA_DIR, 'dow_sales.csv'))
-test_preds    = pd.read_csv(os.path.join(DATA_DIR, 'test_predictions.csv'))
-test_preds['Date'] = pd.to_datetime(test_preds['Date'])
+store_perf = pd.read_csv(DATA_DIR / "store_perf.csv")
+promo_sales = pd.read_csv(DATA_DIR / "promo_sales.csv")
+dow_sales = pd.read_csv(DATA_DIR / "dow_sales.csv")
 
-df_features   = pd.read_csv(os.path.join(DATA_DIR, 'features_lite.csv'))
-df_features['Date'] = pd.to_datetime(df_features['Date'])
+test_preds = pd.read_csv(DATA_DIR / "test_predictions.csv")
+if "Actual Sales" in test_preds.columns:
+    test_preds = test_preds.rename(
+        columns={"Actual Sales": "Actual_Sales", "Predicted Sales": "Predicted_Sales"}
+    )
+if "Date" in test_preds.columns:
+    test_preds["Date"] = pd.to_datetime(test_preds["Date"])
 
-# ── Load model ────────────────────────────────────────────────────
-with open(MODEL_PATH, 'rb') as f:
-    model = pickle.load(f)
+features_lite = pd.read_csv(DATA_DIR / "features_lite.csv")
+if "Date" in features_lite.columns:
+    features_lite["Date"] = pd.to_datetime(features_lite["Date"])
+else:
+    features_lite["Date"] = pd.to_datetime(
+        features_lite[["Year", "Month", "Day"]], errors="coerce"
+    )
 
 # ── KPI values ────────────────────────────────────────────────────
-total_sales      = kpis['total_sales']
-avg_daily_sales  = kpis['avg_daily_sales']
-total_customers  = kpis['total_customers']
-best_store       = kpis['best_store']
-best_store_sales = kpis['best_store_sales']
+total_sales = kpis["total_sales"]
+avg_daily_sales = kpis["avg_daily_sales"]
+total_customers = kpis["total_customers"]
+best_store = kpis["best_store"]
+best_store_sales = kpis["best_store_sales"]
 
-# ── Recursive Forecast Function ───────────────────────────────────
-def forecast_future(store_id, weeks_ahead):
-    store_data = df_features[
-        df_features['Store'] == store_id
-    ].copy().sort_values('Date')
-
-    if len(store_data) == 0:
-        return None, None
-
-    feature_cols = [c for c in df_features.columns
-                    if c not in ['Sales', 'Date']]
-
-    last_date    = store_data['Date'].max()
-    last_sales   = store_data['Sales'].values
-    recent_sales = list(last_sales[-28:])
-    future_dates = []
-    future_preds = []
-    days_ahead   = weeks_ahead * 7
-
-    for day in range(1, days_ahead + 1):
-        next_date = last_date + pd.Timedelta(days=day)
-
-        if next_date.dayofweek == 6:
-            continue
-
-        last_row = store_data.iloc[-1].copy()
-
-        last_row['Year']         = next_date.year
-        last_row['Month']        = next_date.month
-        last_row['Day']          = next_date.day
-        last_row['Week']         = next_date.isocalendar()[1]
-        last_row['DayOfWeek']    = next_date.dayofweek + 1
-        last_row['DayOfYear']    = next_date.timetuple().tm_yday
-        last_row['Quarter']      = (next_date.month - 1) // 3 + 1
-        last_row['IsWeekend']    = 1 if next_date.dayofweek >= 5 else 0
-        last_row['IsMonthStart'] = 1 if next_date.day == 1 else 0
-        last_row['IsMonthEnd']   = 1 if next_date.day == \
-            pd.Timestamp(next_date.year, next_date.month, 1).days_in_month else 0
-
-        month = next_date.month
-        if month in [12,1,2]:   last_row['Season'] = 3
-        elif month in [3,4,5]:  last_row['Season'] = 1
-        elif month in [6,7,8]:  last_row['Season'] = 2
-        else:                    last_row['Season'] = 0
-
-        last_row['Lag_7']  = recent_sales[-7]  if len(recent_sales) >= 7  else np.mean(recent_sales)
-        last_row['Lag_14'] = recent_sales[-14] if len(recent_sales) >= 14 else np.mean(recent_sales)
-        last_row['Lag_21'] = recent_sales[-21] if len(recent_sales) >= 21 else np.mean(recent_sales)
-        last_row['Lag_28'] = recent_sales[-28] if len(recent_sales) >= 28 else np.mean(recent_sales)
-
-        last_row['Rolling_Mean_7']  = np.mean(recent_sales[-7:])
-        last_row['Rolling_Mean_14'] = np.mean(recent_sales[-14:])
-        last_row['Rolling_Mean_28'] = np.mean(recent_sales[-28:])
-        last_row['Rolling_Std_7']   = np.std(recent_sales[-7:])
-        last_row['Rolling_Std_14']  = np.std(recent_sales[-14:])
-        last_row['Rolling_Std_28']  = np.std(recent_sales[-28:])
-
-        X_pred = pd.DataFrame([last_row[feature_cols]])
-        pred   = model.predict(X_pred,
-                               num_iteration=model.best_iteration)[0]
-        pred   = max(0, pred)
-
-        future_dates.append(next_date)
-        future_preds.append(pred)
-
-        recent_sales.append(pred)
-        if len(recent_sales) > 28:
-            recent_sales.pop(0)
-
-    return future_dates, future_preds
 
 # ── Colors ────────────────────────────────────────────────────────
 COLORS = {
@@ -288,7 +224,7 @@ app.layout = dbc.Container([
                             dcc.Dropdown(
                                 id='future-store-dropdown',
                                 options=[{'label':f'Store {i}','value':i}
-                                         for i in sorted(df_features['Store'].unique())],
+                                         for i in sorted(features_lite['Store'].unique())],
                                 value=1,
                                 clearable=False,
                             )
@@ -303,14 +239,52 @@ app.layout = dbc.Container([
                                 marks={4:'4 weeks',8:'8 weeks',
                                        12:'12 weeks',16:'16 weeks'},
                             )
-                        ], width=5),
+                        ], width=3),
+                        dbc.Col([
+                            html.Label("Open:", style={'fontWeight':'bold'}),
+                            dcc.Dropdown(
+                                id='future-open-dropdown',
+                                options=[{'label':'Open', 'value':1}, {'label':'Closed', 'value':0}],
+                                value=1,
+                                clearable=False,
+                            )
+                        ], width=2),
+                        dbc.Col([
+                            html.Label("Promo:", style={'fontWeight':'bold'}),
+                            dcc.Dropdown(
+                                id='future-promo-dropdown',
+                                options=[{'label':'No Promo', 'value':0}, {'label':'Promo', 'value':1}],
+                                value=0,
+                                clearable=False,
+                            )
+                        ], width=2),
+                        dbc.Col([
+                            html.Label("State Holiday:", style={'fontWeight':'bold'}),
+                            dcc.Dropdown(
+                                id='future-stateholiday-dropdown',
+                                options=[{'label':'0', 'value':'0'}, {'label':'a', 'value':'a'}, {'label':'b', 'value':'b'}, {'label':'c', 'value':'c'}],
+                                value='0',
+                                clearable=False,
+                            )
+                        ], width=2),
+                        dbc.Col([
+                            html.Label("School Holiday:", style={'fontWeight':'bold'}),
+                            dcc.Dropdown(
+                                id='future-schoolholiday-dropdown',
+                                options=[{'label':'No', 'value':0}, {'label':'Yes', 'value':1}],
+                                value=0,
+                                clearable=False,
+                            )
+                        ], width=2),
                         dbc.Col([
                             html.Br(),
-                            dbc.Button("Generate Forecast",
-                                       id='forecast-btn',
-                                       color='primary',
-                                       className='mt-1')
-                        ], width=4)
+                            dbc.Button(
+                                "Generate Forecast",
+                                id='forecast-btn',
+                                color='primary',
+                                className='mt-1',
+                            )
+                        ], width=1),
                     ], style={'marginBottom':'15px'}),
                     dcc.Loading(
                         id='loading-forecast',
@@ -340,15 +314,18 @@ def update_forecast(store_id):
     if len(store_data) == 0:
         return go.Figure()
 
+    actual_col = 'Actual_Sales' if 'Actual_Sales' in store_data.columns else 'Actual Sales'
+    pred_col = 'Predicted_Sales' if 'Predicted_Sales' in store_data.columns else 'Predicted Sales'
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=store_data['Date'], y=store_data['Sales'],
+        x=store_data['Date'], y=store_data[actual_col],
         name='Actual',
         line=dict(color=COLORS['primary'], width=2),
         mode='lines+markers', marker=dict(size=4)
     ))
     fig.add_trace(go.Scatter(
-        x=store_data['Date'], y=store_data['Predicted'],
+        x=store_data['Date'], y=store_data[pred_col],
         name='Predicted',
         line=dict(color=COLORS['danger'], width=2, dash='dash'),
         mode='lines+markers', marker=dict(size=4)
@@ -370,23 +347,53 @@ def update_forecast(store_id):
     Output('forecast-summary','children'),
     Input('forecast-btn','n_clicks'),
     Input('future-store-dropdown','value'),
-    Input('weeks-slider','value')
+    Input('weeks-slider','value'),
+    Input('future-open-dropdown','value'),
+    Input('future-promo-dropdown','value'),
+    Input('future-stateholiday-dropdown','value'),
+    Input('future-schoolholiday-dropdown','value'),
 )
-def update_future_forecast(n_clicks, store_id, weeks_ahead):
+def update_future_forecast(
+    n_clicks,
+    store_id,
+    weeks_ahead,
+    open_override,
+    promo_override,
+    state_holiday,
+    school_holiday,
+):
+    if n_clicks is None:
+        return go.Figure(), html.Div()
+
     try:
-        historical = df_features[
-            df_features['Store'] == store_id
+        historical = features_lite[
+            features_lite['Store'] == store_id
         ].tail(30)[['Date','Sales']].copy()
+        historical['Date'] = pd.to_datetime(historical['Date'])
 
-        future_dates, future_preds = forecast_future(store_id, weeks_ahead)
+        response = requests.post(
+            f"{API_BASE_URL}/forecast",
+            json={
+                "store_id": int(store_id),
+                "weeks_ahead": int(weeks_ahead),
+                "open_override": int(open_override),
+                "promo_override": int(promo_override),
+                "state_holiday": str(state_holiday),
+                "school_holiday": int(school_holiday),
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        payload = response.json()
 
-        if future_dates is None:
-            return go.Figure(), "No data available"
+        forecast_rows = payload.get('forecast', [])
+        if not forecast_rows:
+            return go.Figure(), "No forecast data returned"
 
-        forecast_df = pd.DataFrame({
-            'Date'           : future_dates,
-            'Predicted_Sales': future_preds
-        })
+        forecast_df = pd.DataFrame(forecast_rows)
+        forecast_df['date'] = pd.to_datetime(forecast_df['date'])
+        forecast_df['sales'] = pd.to_numeric(forecast_df['sales'], errors='coerce').fillna(0)
+        forecast_df = forecast_df.rename(columns={'date': 'Date', 'sales': 'Predicted_Sales'})
 
         fig = go.Figure()
 
@@ -417,7 +424,7 @@ def update_future_forecast(n_clicks, store_id, weeks_ahead):
             showlegend=False
         ))
 
-        forecast_start = str(historical['Date'].max().date())
+        forecast_start = str(forecast_df['Date'].min().date())
         fig.add_shape(
             type='line',
             x0=forecast_start, x1=forecast_start,
@@ -440,9 +447,9 @@ def update_future_forecast(n_clicks, store_id, weeks_ahead):
             height=450
         )
 
-        avg_pred   = forecast_df['Predicted_Sales'].mean()
-        max_pred   = forecast_df['Predicted_Sales'].max()
-        min_pred   = forecast_df['Predicted_Sales'].min()
+        avg_pred = forecast_df['Predicted_Sales'].mean()
+        max_pred = forecast_df['Predicted_Sales'].max()
+        min_pred = forecast_df['Predicted_Sales'].min()
         total_pred = forecast_df['Predicted_Sales'].sum()
 
         summary = dbc.Row([
@@ -462,6 +469,23 @@ def update_future_forecast(n_clicks, store_id, weeks_ahead):
 
         return fig, summary
 
+    except requests.exceptions.ConnectionError:
+        return go.Figure(), html.P(
+            f"Forecast API is unavailable at {API_BASE_URL}. "
+            "Start it with: python -m uvicorn api.main:app --host 0.0.0.0 --port 8000",
+            style={'color': 'red'}
+        )
+    except requests.exceptions.Timeout:
+        return go.Figure(), html.P(
+            "The forecast API did not respond within the timeout period.",
+            style={'color': 'red'}
+        )
+    except requests.exceptions.HTTPError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        return go.Figure(), html.P(
+            f"Forecast API error: {detail}",
+            style={'color': 'red'}
+        )
     except Exception as e:
         import traceback
         print("❌ ERROR:", traceback.format_exc())

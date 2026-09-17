@@ -12,5 +12,13 @@ __pycache__/
 # VS Code
 .vscode/
 
+# Local Python environments
+.venv/
+venv/
+env/
+
+# Runtime logs
+*.log
+
 # Allow dashboard data
 !dashboard/data/
